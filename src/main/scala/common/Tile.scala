@@ -96,6 +96,8 @@ class ShuttleTile private(
   val masterNode = visibilityNode
   val slaveNode = TLIdentityNode()
 
+  val tensor_xbar = LazyModule(new TLXbar)
+
   val cpuDevice: SimpleDevice = new SimpleDevice("cpu", Seq("ucb-bar,shuttle", "riscv")) {
     override def parent = Some(ResourceAnchors.cpus)
     override def describe(resources: ResourceBindings): Description = {
@@ -114,6 +116,8 @@ class ShuttleTile private(
   // Put this on the edges between masters on this tile, and the masterxbar
   def tcmAdjusterNode(params: Option[TCMParams]): TLNode = params.map { tcmParams =>
     val replicationSize = (1 << log2Ceil(p(NumTiles))) * tcmParams.size
+    println(s"[yjpdebug]Replication Size: $replicationSize")
+    println(s"[yjpdebug]NumTiles: ${p(NumTiles)}")
     val tcm_adjuster = LazyModule(new AddressOffsetter(tcmParams.size-1, replicationSize))
     InModuleBody { tcm_adjuster.module.io.base := tcmParams.base.U + tcmParams.size.U * hartIdSinkNode.bundle }
     tcm_adjuster.node
@@ -142,12 +146,29 @@ class ShuttleTile private(
     val prefix_master_source = BundleBridgeSource[UInt](() => UInt(1.W))
     tcm_master_replicator.prefix := prefix_master_source
     InModuleBody { prefix_master_source.bundle := 0.U }
-    tcm_master_replicator.node := TLFilter(TLFilter.mSubtract(AddressSet(tcmParams.base, replicationSize-1)))
+    tcm_master_replicator.node :*=* TLFilter(TLFilter.mSubtract(AddressSet(tcmParams.base, replicationSize-1)))
   } .getOrElse { TLEphemeralNode() }
 
+  val tensor_unit = shuttleParams.core.tensor.map(t => LazyModule(t.build(p)))
+  // tensor_unit.map(_.module.io_sg_base := 0x78000000L.U) 
+  tensor_unit.foreach { tu => (tlMasterXbar.node
+    :=* TLBuffer()
+    :=* tu.atlNode) }
+  tensor_unit.foreach { tu => (tu.tcmslaveNode
+    :=* TLBuffer()
+    :=* tensor_xbar.node) }
+  tensor_unit.foreach { tu => (tu.sgtcmslaveNode
+    :=* TLBuffer()
+    :=* tensor_xbar.node) }
+  
+  val RoccWapper = shuttleParams.core.tensor.map{t => LazyModule(t.buildroccwarper(p))}
 
+  println("tensor_unit size: " + tensor_unit.size)
+  val roccs = if (tensor_unit.size != 0) {Seq(RoccWapper.get)} else {
+    p(BuildRoCC).map(_(p))
+  }
 
-  val roccs = p(BuildRoCC).map(_(p))
+  // val roccs = p(BuildRoCC).map(_(p))
 
   roccs.map(_.atlNode).foreach { atl => tlMasterXbar.node :=* tcmAdjusterNode(shuttleParams.tcm) :=* tcmAdjusterNode(shuttleParams.sgtcm) :=* atl }
   roccs.map(_.tlNode).foreach { tl => tlOtherMastersNode :=* tl }
@@ -156,7 +177,7 @@ class ShuttleTile private(
     "LazyRoCC instantiations require overlapping CSRs")
 
   val frontend = LazyModule(new ShuttleFrontend(tileParams.icache.get, tileId))
-  (tlMasterXbar.node
+  (tensor_xbar.node
     := TLBuffer()
     := tcmAdjusterNode(shuttleParams.tcm)
     := tcmAdjusterNode(shuttleParams.sgtcm)
@@ -166,14 +187,20 @@ class ShuttleTile private(
 
   val nPTWPorts = 2 + roccs.map(_.nPTWPorts).sum
   val dcache = LazyModule(new ShuttleDCache(tileId, ShuttleDCacheParams())(p))
-  (tlMasterXbar.node
+  (tensor_xbar.node
     := TLBuffer()
     := tcmAdjusterNode(shuttleParams.tcm)
     := tcmAdjusterNode(shuttleParams.sgtcm)
     := TLWidthWidget(tileParams.dcache.get.rowBits/8)
     := dcache.node)
 
-  val vector_unit = shuttleParams.core.vector.map(v => LazyModule(v.build(p)))
+  tlMasterXbar.node :=* tensor_xbar.node
+
+  println("vector_unit size: " + shuttleParams.core.vector.size)
+  val vector_unit = shuttleParams.core.tensor match {
+    case Some(t) => None // tensor unit is used, so no vector unit
+    case None => shuttleParams.core.vector.map(v => LazyModule(v.build(p)))
+  }
   vector_unit.foreach { vu => (tlMasterXbar.node
     :=* TLBuffer()
     :=* tcmAdjusterNode(shuttleParams.tcm)
@@ -182,23 +209,23 @@ class ShuttleTile private(
   }
   vector_unit.foreach(vu => tlOtherMastersNode :=* vu.tlNode)
 
-  val tcmSlaveXbar = ((shuttleParams.tcm.isDefined || shuttleParams.sgtcm.isDefined)).option(TLXbar())
+  val tcmSlaveXbar = ((shuttleParams.sgtcm.isDefined)).option(TLXbar())
 
-  shuttleParams.tcm.foreach { tcmParams => DisableMonitors { implicit p =>
-    val device = new MemoryDevice
-    for (b <- 0 until tcmParams.banks) {
-      val base = tcmParams.base + b * p(CacheBlockBytes)
-      val mask = tcmParams.size - 1 - (tcmParams.banks - 1) * p(CacheBlockBytes)
-      val tcm = LazyModule(new TLRAM(
-        address = AddressSet(base, mask),
-        beatBytes = shuttleParams.tileBeatBytes,
-        atomics = true,
-        devOverride = Some(device),
-        devName = Some(s"Core $tileId TCM bank $b")
-      ))
-      tcm.node := TLFragmenter(shuttleParams.tileBeatBytes, p(CacheBlockBytes)) := TLBuffer() := tcmSlaveXbar.get
-    }
-  }}
+  // shuttleParams.tcm.foreach { tcmParams => DisableMonitors { implicit p =>
+  //   val device = new MemoryDevice
+  //   for (b <- 0 until tcmParams.banks) {
+  //     val base = tcmParams.base + b * p(CacheBlockBytes)
+  //     val mask = tcmParams.size - 1 - (tcmParams.banks - 1) * p(CacheBlockBytes)
+  //     val tcm = LazyModule(new TLRAM(
+  //       address = AddressSet(base, mask),
+  //       beatBytes = shuttleParams.tileBeatBytes,
+  //       atomics = true,
+  //       devOverride = Some(device),
+  //       devName = Some(s"Core $tileId TCM bank $b")
+  //     ))
+  //     tcm.node := TLFragmenter(shuttleParams.tileBeatBytes, p(CacheBlockBytes)) := TLBuffer() := tcmSlaveXbar.get
+  //   }
+  // }}
 
   val sgtcmXbar = LazyModule(new TLXbar())
   shuttleParams.sgtcm.foreach { sgtcmParams => DisableMonitors { implicit p =>
@@ -211,9 +238,9 @@ class ShuttleTile private(
       devOverride = Some(device),
       devName = Some(s"Core $tileId SGTCM")
     ))
-    sgtcm.node := TLWidthWidget(shuttleParams.tileBeatBytes) := tcmSlaveXbar.get
-    sgtcm.sgnode :*= sgtcmXbar.node
-    vector_unit.foreach { vu => sgtcmXbar.node :=* vu.sgNode.get }
+    sgtcm.node := TLWidthWidget(shuttleParams.tileBeatBytes) := tcmSlaveXbar.get //连到tcmSlaveXbar上，能被连到tlMasterXbar.node上，也能被tile暴露出去的slavenode连到
+    sgtcm.sgnode :*= sgtcmXbar.node //处理sgload的node从这里出去，就变成banks根地址线了
+    vector_unit.foreach { vu => sgtcmXbar.node :=* vu.sgNode.get }//banks根地址线，banks个tlnode一起连到了sgtcmXbar，
   }}
 
   val trace_encoder_controller = shuttleParams.traceParams.map { t =>
@@ -236,29 +263,44 @@ class ShuttleTile private(
 
   tcmSlaveXbar.map { tcmSlaveXbar =>
     // Connect to slavebar to the slaveport into the tile
-    (tcmSlaveXbar
-      := tcmSlaveReplicator(shuttleParams.tcm)
-      := tcmSlaveReplicator(shuttleParams.sgtcm)
-      := TLFilter({m =>
-        // Expose only the part of the TCM's address space which corresponds to our tile
-        val tcmMatch: Option[TLSlaveParameters]   = if (m.name.contains(" TCM"))  shuttleParams.tcm  .map(t =>
-          m.v1copy(address=m.address.map(_.intersect(AddressSet(t.base + tileId * t.size, t.size-1))).flatten)
-        ) else None
-        // Expose only the part of the SGTCM's address space which corresponds to our tile
-        val sgtcmMatch: Option[TLSlaveParameters] = if (m.name.contains("SGTCM")) shuttleParams.sgtcm.map(t =>
-          m.v1copy(address=m.address.map(_.intersect(AddressSet(t.base + tileId * t.size, t.size-1))).flatten)
-        ) else None
-        Some(tcmMatch.getOrElse(sgtcmMatch.getOrElse(m)))
-      })
-      := tlSlaveXbar.node)
+    // Cutev4 ---> broadcast TMA will be used to connect to the slave port
+    // (tcmSlaveXbar
+    //   := tcmSlaveReplicator(shuttleParams.tcm)
+    //   := tcmSlaveReplicator(shuttleParams.sgtcm)
+    //   := TLFilter({m =>
+    //     // Expose only the part of the TCM's address space which corresponds to our tile
+    //     val tcmMatch: Option[TLSlaveParameters]   = if (m.name.contains(" TCM"))  shuttleParams.tcm  .map(t =>
+    //       m.v1copy(address=m.address.map(_.intersect(AddressSet(t.base + tileId * t.size, t.size-1))).flatten)
+    //     ) else None
+    //     // Expose only the part of the SGTCM's address space which corresponds to our tile
+    //     val sgtcmMatch: Option[TLSlaveParameters] = if (m.name.contains("SGTCM")) shuttleParams.sgtcm.map(t =>
+    //       m.v1copy(address=m.address.map(_.intersect(AddressSet(t.base + tileId * t.size, t.size-1))).flatten)
+    //     ) else None
+    //     Some(tcmMatch.getOrElse(sgtcmMatch.getOrElse(m)))
+    //   })
+    //   := tlSlaveXbar.node)
 
     // Connect the slavebar to the master bar
     (tcmSlaveXbar
-      := tcmMasterReplicator(shuttleParams.tcm)
       := tcmMasterReplicator(shuttleParams.sgtcm)
       := tlMasterXbar.node)
   }
 
+  shuttleParams.tcm.foreach { tcmParams => DisableMonitors { implicit p =>
+    val device = new MemoryDevice
+    for (b <- 0 until tcmParams.banks) {
+      val base = tcmParams.base + b * p(CacheBlockBytes)
+      val mask = tcmParams.size - 1 - (tcmParams.banks - 1) * p(CacheBlockBytes)
+      val tcm = LazyModule(new TLRAM(
+        address = AddressSet(base, mask),
+        beatBytes = shuttleParams.tileBeatBytes,
+        atomics = true,
+        devOverride = Some(device),
+        devName = Some(s"Core $tileId TCM bank $b")
+      ))
+      tcm.node := TLFragmenter(shuttleParams.tileBeatBytes, p(CacheBlockBytes)) := TLBuffer() := tcmMasterReplicator(shuttleParams.tcm) := tlMasterXbar.node
+    }
+  }}
 
   DisableMonitors { implicit p => (tlOtherMastersNode
     := TLBuffer()
@@ -281,13 +323,27 @@ class ShuttleTile private(
 class ShuttleTileModuleImp(outer: ShuttleTile) extends BaseTileModuleImp(outer)
 {
   val core = Module(new ShuttleCore(outer, outer.dcache.module.edge)(outer.p))
-  outer.vector_unit.foreach { v =>
-    core.io.vector.get <> v.module.io
+
+  outer.tensor_unit.foreach { t =>
+    core.io.vector.get <> t.module.vector_io
     val sgtcmParams = outer.shuttleParams.sgtcm
-    v.module.io_sg_base := sgtcmParams.map { sgtcm =>
+    t.module.io_sg_base := sgtcmParams.map { sgtcm =>
       sgtcm.base.U + outer.hartIdSinkNode.bundle * sgtcm.size.U
     }.getOrElse(0.U)
   }
+
+  if(outer.tensor_unit.size == 0 && outer.vector_unit.size != 0)
+  {
+    outer.vector_unit.foreach { v =>
+      println("core.io.vector = " + core.io.vector.get)
+      core.io.vector.get <> v.module.io
+      val sgtcmParams = outer.shuttleParams.sgtcm
+      v.module.io_sg_base := sgtcmParams.map { sgtcm =>
+        sgtcm.base.U + outer.hartIdSinkNode.bundle * sgtcm.size.U
+      }.getOrElse(0.U)
+    }
+  }
+
 
   val dcachePorts = Wire(Vec(2, new ShuttleDCacheIO))
   val ptwPorts = Wire(Vec(outer.nPTWPorts, new TLBPTWIO))
@@ -409,6 +465,13 @@ class ShuttleTileModuleImp(outer: ShuttleTile) extends BaseTileModuleImp(outer)
     (core.io.rocc.csrs zip roccCSRIOs.flatten).foreach { t => t._2 := t._1 }
   }
 
+  outer.RoccWapper.map { roccwapper =>
+    roccwapper.module.asInstanceOf[RoccWapperImp].wapperio <> outer.tensor_unit.get.module.rocc_io
+  }
+
+  outer.tensor_unit.map { tu =>
+    tu.module.io_sg_base := 0x78000000L.U
+  }
 
   val dcacheArb = Module(new ShuttleDCacheArbiter(2)(outer.p))
   outer.dcache.module.io <> dcacheArb.io.mem
