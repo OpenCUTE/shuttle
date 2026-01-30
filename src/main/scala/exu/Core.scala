@@ -712,6 +712,15 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
   val mem_dmem_uop = Mux1H(mem_dmem_oh, mem_uops_reg)
 
   io.ptw_tlb <> dtlb.io.ptw
+  val usePrintfDebugTLB = shuttleParams.debugTLB
+  if(usePrintfDebugTLB) {
+    when(dtlb.io.ptw.req.fire) {
+      printf(p"[PTW REQ] vaddr: 0x${Hexadecimal(dtlb.io.ptw.req.bits.bits.addr)}\n")
+    }
+    when(dtlb.io.ptw.resp.valid) {
+      printf(p"[PTW RESP] paddr: 0x${Hexadecimal(dtlb.io.ptw.resp.bits.pte.ppn)}\n")
+    }
+  }
   dtlb.io.req.last.valid := mem_dmem_uop.valid
   dtlb.io.req.last.bits.vaddr := RegEnable(io.dmem.req.bits.addr, ex_uops_reg.map(_.valid).orR)
   dtlb.io.req.last.bits.size := mem_dmem_uop.bits.mem_size

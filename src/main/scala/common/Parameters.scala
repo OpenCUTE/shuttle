@@ -41,7 +41,8 @@ case class ShuttleCoreParams(
   vector: Option[ShuttleCoreVectorParams] = None,
   tensor: Option[ShuttleCoreTensorParams] = None,
   enableTraceCoreIngress: Boolean = false,
-  debugPrintf: Boolean = false
+  debugPrintf: Boolean = false,
+  debugTLB: Boolean = false
 ) extends CoreParams
 {
   require(Seq(4, 8, 16, 32).contains(fetchWidth))
