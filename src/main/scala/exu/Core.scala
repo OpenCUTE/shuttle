@@ -880,7 +880,15 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
   val divSqrt_val = RegInit(false.B)
   val divSqrt_waddr = Reg(UInt(5.W))
   val divSqrt_typeTag = Reg(UInt(2.W))
-  val divSqrt_wdata = Reg(Valid(UInt(65.W)))
+
+  // 这个是大坑， divSqrt_wdata的valid表示divsqrt浮点计算部件空闲，必须初始化
+  // val divSqrt_wdata = Reg(Valid(UInt(65.W)))
+  val divSqrt_wdata = RegInit({
+    val init = Wire(Valid(UInt(65.W)))
+    init.valid := true.B
+    init.bits  := 0.U
+    init
+  })
   val divSqrt_flags = Reg(UInt(FPConstants.FLAGS_SZ.W))
   when (com_fp_divsqrt_valid && divSqrt_val) {
     com_uops(0).bits.needs_replay := true.B
