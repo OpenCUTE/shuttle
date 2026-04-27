@@ -186,13 +186,8 @@ class ShuttleTile private(
   frontend.resetVectorSinkNode := resetVectorNexusNode
 
   val nPTWPorts = 2 + roccs.map(_.nPTWPorts).sum
-<<<<<<< HEAD
-  val dcache = LazyModule(new ShuttleDCache(tileId, shuttleParams.dcacheParams)(p))
-  (tlMasterXbar.node
-=======
   val dcache = LazyModule(new ShuttleDCache(tileId, ShuttleDCacheParams())(p))
   (tensor_xbar.node
->>>>>>> dac2026
     := TLBuffer()
     := tcmAdjusterNode(shuttleParams.tcm)
     := tcmAdjusterNode(shuttleParams.sgtcm)
@@ -337,9 +332,6 @@ class ShuttleTileModuleImp(outer: ShuttleTile) extends BaseTileModuleImp(outer)
     }.getOrElse(0.U)
   }
 
-<<<<<<< HEAD
-  val dcachePorts = Wire(Vec(2 + outer.roccs.size, new ShuttleDCacheIO))
-=======
   if(outer.tensor_unit.size == 0 && outer.vector_unit.size != 0)
   {
     outer.vector_unit.foreach { v =>
@@ -354,7 +346,6 @@ class ShuttleTileModuleImp(outer: ShuttleTile) extends BaseTileModuleImp(outer)
 
 
   val dcachePorts = Wire(Vec(2, new ShuttleDCacheIO))
->>>>>>> dac2026
   val ptwPorts = Wire(Vec(outer.nPTWPorts, new TLBPTWIO))
   val edge = outer.dcache.node.edges.out(0)
   ptwPorts(0) <> core.io.ptw_tlb
