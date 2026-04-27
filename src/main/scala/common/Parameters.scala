@@ -19,6 +19,15 @@ case class ShuttleCoreVectorParams(
   issueVConfig: Boolean,
   vExts: Seq[String])
 
+case class ShuttleCoreTensorParams(
+  build: Parameters => ShuttleTensorUnit,
+  buildroccwarper: Parameters => LazyRoCC,
+  vLen: Int,
+  vfLen: Int,
+  vfh: Boolean,
+  decoder: Parameters => RocketVectorDecoder,
+  issueVConfig: Boolean,
+  vExts: Seq[String])
 
 case class ShuttleCoreParams(
   nL2TLBEntries: Int = 512,
@@ -30,7 +39,9 @@ case class ShuttleCoreParams(
   fetchWidth: Int = 4,
   debugROB: Boolean = false,
   vector: Option[ShuttleCoreVectorParams] = None,
-  enableTraceCoreIngress: Boolean = false
+  tensor: Option[ShuttleCoreTensorParams] = None,
+  enableTraceCoreIngress: Boolean = false,
+  debugPrintf: Boolean = false
 ) extends CoreParams
 {
   require(Seq(4, 8, 16, 32).contains(fetchWidth))

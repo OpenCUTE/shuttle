@@ -79,6 +79,16 @@ class WithShuttleDebugROB extends Config((site, here, up) => {
 
 })
 
+class WithShuttleDebugPrintf extends Config((site, here, up) => {
+  case TilesLocated(loc) => up(TilesLocated(loc), site) map {
+    case tp: ShuttleTileAttachParams => tp.copy(tileParams = tp.tileParams.copy(
+      core = tp.tileParams.core.copy(debugPrintf = true)
+    ))
+    case other => other
+  }
+
+})
+
 class WithL1ICacheSets(sets: Int, location: HierarchicalLocation = InSubsystem) extends Config((site, here, up) => {
   case TilesLocated(`location`) => up(TilesLocated(location), site) map {
     case tp: ShuttleTileAttachParams => tp.copy(tileParams = tp.tileParams.copy(

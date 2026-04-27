@@ -569,7 +569,7 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     v.ex.vconfig := ex_vcfg.get.bits
     v.ex.vstart := Mux(mem_vcfg.get.valid || com_vcfg.get.valid, 0.U, csr.io.vector.get.vstart)
     v.ex.fire := !ex_stall && !flush_rrd_ex
-    v.ex.uop := ex_uops_reg(0).bits
+    v.ex.uop := ex_uops_reg(0).bits//执行阶段一起和标量解析
     when (ex_uops_reg(0).bits.ctrl.rfs1) {
       v.ex.uop.rs1_data := fp_pipe.io.frs1_data
     }
@@ -742,6 +742,15 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     val ctrl = uop.ctrl
     when (mem_uops_reg(i).valid && mem_uops_reg(i).bits.ctrl.jalr && csr.io.status.debug) {
       io.imem.flush_icache := true.B
+      io.imem.redirect_val := true.B
+      io.imem.redirect_flush := true.B
+      io.imem.redirect_pc := mem_brjmp_npc
+      io.imem.redirect_ras_head := Mux(mem_brjmp_call,
+        Mux(mem_brjmp_uop.ras_head === (mem_brjmp_uop.nRAS-1).U, 0.U, mem_brjmp_uop.ras_head + 1.U),
+        Mux(mem_brjmp_ret,
+          Mux(mem_brjmp_uop.ras_head === 0.U, (mem_brjmp_uop.nRAS-1).U, mem_brjmp_uop.ras_head - 1.U),
+          mem_brjmp_uop.ras_head))
+      flush_rrd_ex := true.B
     }
     when (mem_brjmp_oh(i) && mem_uops_reg(i).bits.ctrl.jalr) {
       com_uops_reg(i).bits.wdata.valid := true.B
@@ -879,7 +888,15 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
   val divSqrt_val = RegInit(false.B)
   val divSqrt_waddr = Reg(UInt(5.W))
   val divSqrt_typeTag = Reg(UInt(2.W))
-  val divSqrt_wdata = Reg(Valid(UInt(65.W)))
+
+  // 这个是大坑， divSqrt_wdata的valid表示divsqrt浮点计算部件空闲，必须初始化
+  // val divSqrt_wdata = Reg(Valid(UInt(65.W)))
+  val divSqrt_wdata = RegInit({
+    val init = Wire(Valid(UInt(65.W)))
+    init.valid := true.B
+    init.bits  := 0.U
+    init
+  })
   val divSqrt_flags = Reg(UInt(FPConstants.FLAGS_SZ.W))
   when (com_fp_divsqrt_valid && divSqrt_val) {
     com_uops(0).bits.needs_replay := true.B
@@ -928,7 +945,7 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
   }
 
   val com_rocc_valid = com_uops_reg(0).valid && com_uops_reg(0).bits.ctrl.rocc
-  val com_rocc_uop = com_uops_reg(0)
+  val com_rocc_uop = com_uops_reg(0)//rocc指令只会是第一条指令
   io.rocc.cmd.valid := false.B
   io.rocc.cmd.bits := DontCare
   io.rocc.mem := DontCare
@@ -1032,6 +1049,37 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     }
   }
 
+  val usePrintfDebugROB = shuttleParams.debugPrintf
+  if (usePrintfDebugROB) {
+    val trace = WireInit(csr.io.trace)
+    for (i <- 0 until retireWidth) {
+      val pc = if (usingVector) Mux(io.vector.get.com.retire_late, io.vector.get.com.pc, com_uops(i).bits.pc) else com_uops(i).bits.pc
+      trace(i).valid := com_retire(i) || ((i == 0).B && csr.io.exception)
+      trace(i).wdata.get := com_uops(i).bits.wdata.bits
+      trace(i).iaddr := pc
+      val ctrl = com_uops(i).bits.ctrl
+      val rd = com_uops(i).bits.rd
+      val should_wb = !io.vector.map(_.com.retire_late).getOrElse(false.B) && (ctrl.wfd || (ctrl.wxd && rd =/= 0.U)) && !csr.io.trace(i).exception
+
+      val time_stamp= RegInit(0.U(64.W))
+        time_stamp := time_stamp + 1.U
+      when (trace(i).valid) 
+      {
+        printf("[shuttle(%d)<%d>]: %x %x %x %x %x %x %x %x\n",
+                io.hartid,
+                time_stamp,
+                trace(i).iaddr,
+                trace(i).insn,
+                trace(i).priv,
+                trace(i).exception,
+                trace(i).interrupt,
+                trace(i).cause,
+                trace(i).tval,
+                trace(i).wdata.get)
+      }   
+    }
+  }
+
   csr.io.rw.addr := Mux(com_uops_reg(0).valid, com_uops_reg(0).bits.inst(31,20), 0.U)
   csr.io.rw.cmd := CSR.maskCmd(com_uops_reg(0).valid && !com_uops_reg(0).bits.xcpt,
     com_uops_reg(0).bits.ctrl.csr)
@@ -1059,7 +1107,7 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     when (com_uops_reg(i).valid && com_uops_reg(i).bits.ctrl.mem && io.dmem.s2_nack) {
       com_uops(i).bits.needs_replay := true.B
     }
-    when (com_uops_reg(i).valid && com_uops_reg(i).bits.ctrl.rocc && !io.rocc.cmd.ready) {
+    when (com_uops_reg(i).valid && com_uops_reg(i).bits.ctrl.rocc && !io.rocc.cmd.ready) {//rocc指令没完成，需要重播rocc指令
       com_uops(i).bits.needs_replay := true.B
     }
   }
@@ -1071,19 +1119,20 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     io.vector.get.com.scalar_check.bits.addr := RegEnable(dtlb.io.resp.last.paddr, mem_uops_reg.map(_.valid).orR)
     io.vector.get.com.scalar_check.bits.size := Mux1H(sel, mem_uops_reg.map(_.bits.mem_size))
     io.vector.get.com.scalar_check.bits.store := isWrite(Mux1H(sel, mem_uops_reg.map(_.bits.ctrl.mem_cmd)))
+    // val commit_vector_init = com_uops(i).bits.
     for (i <- 0 until retireWidth) {
       when (io.vector.get.com.scalar_check.valid && !io.vector.get.com.scalar_check.ready && com_uops_reg(i).bits.ctrl.mem) {
         com_uops(i).bits.needs_replay := true.B
       }
     }
     for (i <- 0 until retireWidth) {
-      when (io.vector.get.com.block_all) {
+      when (io.vector.get.com.block_all) {//发生block_all,需要重播向量指令
         com_uops(i).bits.needs_replay := true.B
       }
     }
     when (io.vector.get.com.internal_replay) {
-      kill_com(0) := true.B
-      com_uops.tail.foreach(_.bits.needs_replay := true.B)
+      kill_com(0) := true.B//进入ifc，暂停提交这条指令，同时暂停提交
+      com_uops.tail.foreach(_.bits.needs_replay := true.B)//进入ifc，所有后面的指令都需要重新取指，
     }
   }
   for (i <- 1 until retireWidth) {
