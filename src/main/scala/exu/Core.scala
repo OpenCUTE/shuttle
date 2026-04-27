@@ -743,6 +743,15 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     val ctrl = uop.ctrl
     when (mem_uops_reg(i).valid && mem_uops_reg(i).bits.ctrl.jalr && csr.io.status.debug) {
       io.imem.flush_icache := true.B
+      io.imem.redirect_val := true.B
+      io.imem.redirect_flush := true.B
+      io.imem.redirect_pc := mem_brjmp_npc
+      io.imem.redirect_ras_head := Mux(mem_brjmp_call,
+        Mux(mem_brjmp_uop.ras_head === (mem_brjmp_uop.nRAS-1).U, 0.U, mem_brjmp_uop.ras_head + 1.U),
+        Mux(mem_brjmp_ret,
+          Mux(mem_brjmp_uop.ras_head === 0.U, (mem_brjmp_uop.nRAS-1).U, mem_brjmp_uop.ras_head - 1.U),
+          mem_brjmp_uop.ras_head))
+      flush_rrd_ex := true.B
     }
     when (mem_brjmp_oh(i) && mem_uops_reg(i).bits.ctrl.jalr) {
       com_uops_reg(i).bits.wdata.valid := true.B
